@@ -11,6 +11,7 @@
 # under the License.
 
 from heatclient import client as heatclient
+from neutronclient.v2_0 import client as neutronclient
 from tacker.vnfm import keystone
 
 
@@ -21,6 +22,7 @@ class OpenstackClients(object):
         self.keystone_plugin = keystone.Keystone()
         self.heat_client = None
         self.keystone_client = None
+        self.neutron_client = None
         self.region_name = region_name
         self.auth_attr = auth_attr
 
@@ -33,6 +35,12 @@ class OpenstackClients(object):
         endpoint = self.keystone_session.get_endpoint(
             service_type='orchestration', region_name=self.region_name)
         return heatclient.Client('1', endpoint=endpoint,
+                                 session=self.keystone_session)
+
+    def _neutron_client(self):
+        endpoint = self.keystone_session.get_endpoint(
+            service_type='network', region_name=self.region_name)
+        return neutronclient.Client('1', endpoint=endpoint,
                                  session=self.keystone_session)
 
     @property
@@ -50,3 +58,9 @@ class OpenstackClients(object):
         if not self.heat_client:
             self.heat_client = self._heat_client()
         return self.heat_client
+
+    @property
+    def neutron(self):
+        if not self.neutron_client:
+            self.neutron_client = self._neutron_client()
+        return self.neutron_client

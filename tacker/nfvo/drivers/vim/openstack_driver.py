@@ -28,6 +28,7 @@ from oslo_log import log as logging
 from tacker._i18n import _LW, _
 from tacker.agent.linux import utils as linux_utils
 from tacker.common import log
+from tacker.common import clients
 from tacker.extensions import nfvo
 from tacker.nfvo.drivers.vim import abstract_vim_driver
 from tacker.vnfm import keystone
@@ -274,3 +275,160 @@ class OpenStack_Driver(abstract_vim_driver.VimAbstractDriver):
         auth_plugin = self._get_auth_plugin(keystone_version, **auth_cred)
         sess = session.Session(auth=auth_plugin)
         return client_type(session=sess)
+
+
+    @log.log
+    def create_lb(self, vnf, auth_attr):
+        """Create a LBaaS instance"""
+        region_name = vnf.get('placement_attr', {}).get('region_name', None)
+        neutronclient_ = NeutronClient(auth_attr, region_name)
+        neutronclient_.loadbalancer_create
+
+
+
+class NeutronClient(object):
+    def __init__(self, auth_attr, region_name=None):
+        # context, password are unused
+        self.neutron = clients.OpenstackClients(auth_attr, region_name).neutron
+
+    def network_get(self, name_or_id, ignore_missing=False):
+        network = self.neutron.find_network(name_or_id, ignore_missing)
+        return network
+
+    def port_find(self, name_or_id, ignore_missing=False):
+        port = self.neutron.find_port(name_or_id, ignore_missing)
+        return port
+
+    def subnet_get(self, name_or_id, ignore_missing=False):
+        subnet = self.neutron.find_subnet(name_or_id, ignore_missing)
+        return subnet
+
+    def loadbalancer_get(self, name_or_id, ignore_missing=False):
+        lb = self.neutron.find_load_balancer(name_or_id, ignore_missing)
+        return lb
+
+    def loadbalancer_create(self, vip_subnet_id, vip_address=None,
+                            admin_state_up=True, name=None, description=None):
+
+        kwargs = {
+            'vip_subnet_id': vip_subnet_id,
+            'admin_state_up': admin_state_up,
+        }
+
+        if vip_address is not None:
+            kwargs['vip_address'] = vip_address
+        if name is not None:
+            kwargs['name'] = name
+        if description is not None:
+            kwargs['description'] = description
+
+        res = self.neutron.create_load_balancer(**kwargs)
+        return res
+
+    def loadbalancer_delete(self, lb_id, ignore_missing=True):
+        self.neutron.delete_load_balancer(
+            lb_id, ignore_missing=ignore_missing)
+        return
+
+    def listener_create(self, loadbalancer_id, protocol, protocol_port,
+                        connection_limit=None,
+                        admin_state_up=True, name=None, description=None):
+
+        kwargs = {
+            'loadbalancer_id': loadbalancer_id,
+            'protocol': protocol,
+            'protocol_port': protocol_port,
+            'admin_state_up': admin_state_up,
+        }
+
+        if connection_limit is not None:
+            kwargs['connection_limit'] = connection_limit
+        if name is not None:
+            kwargs['name'] = name
+        if description is not None:
+            kwargs['description'] = description
+
+        res = self.neutron.create_listener(**kwargs)
+        return res
+
+    def listener_delete(self, listener_id, ignore_missing=True):
+        self.neutron.delete_listener(listener_id,
+                                          ignore_missing=ignore_missing)
+        return
+
+    def pool_create(self, lb_algorithm, listener_id, protocol,
+                    admin_state_up=True, name=None, description=None):
+
+        kwargs = {
+            'lb_algorithm': lb_algorithm,
+            'listener_id': listener_id,
+            'protocol': protocol,
+            'admin_state_up': admin_state_up,
+        }
+
+        if name is not None:
+            kwargs['name'] = name
+        if description is not None:
+            kwargs['description'] = description
+
+        res = self.neutron.create_pool(**kwargs)
+        return res
+
+    def pool_delete(self, pool_id, ignore_missing=True):
+        self.neutron.delete_pool(pool_id,
+                                      ignore_missing=ignore_missing)
+        return
+
+    def pool_member_create(self, pool_id, address, protocol_port, subnet_id,
+                           weight=None, admin_state_up=True):
+
+        kwargs = {
+            'address': address,
+            'protocol_port': protocol_port,
+            'admin_state_up': admin_state_up,
+            'subnet_id': subnet_id,
+        }
+
+        if weight is not None:
+            kwargs['weight'] = weight
+
+        res = self.neutron.create_pool_member(pool_id, **kwargs)
+        return res
+
+    def pool_member_delete(self, pool_id, member_id, ignore_missing=True):
+        self.neutron.delete_pool_member(
+            member_id, pool_id, ignore_missing=ignore_missing)
+        return
+
+    def healthmonitor_create(self, hm_type, delay, timeout, max_retries,
+                             pool_id, admin_state_up=True,
+                             http_method=None, url_path=None,
+                             expected_codes=None):
+        kwargs = {
+            'type': hm_type,
+            'delay': delay,
+            'timeout': timeout,
+            'max_retries': max_retries,
+            'pool_id': pool_id,
+            'admin_state_up': admin_state_up,
+        }
+
+        # TODO(anyone): verify if this is correct
+        if hm_type == 'HTTP':
+            if http_method is not None:
+                kwargs['http_method'] = http_method
+            if url_path is not None:
+                kwargs['url_path'] = url_path
+            if expected_codes is not None:
+                kwargs['expected_codes'] = expected_codes
+
+        res = self.neutron.create_health_monitor(**kwargs)
+        return res
+
+    def healthmonitor_delete(self, hm_id, ignore_missing=True):
+        self.neutron.delete_health_monitor(
+            hm_id, ignore_missing=ignore_missing)
+        return
+
+        
+

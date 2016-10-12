@@ -20,8 +20,10 @@ import six
 from tacker._i18n import _
 from tacker.api import extensions
 from tacker.api.v1 import attributes as attr
+from tacker.api.v1 import base
 from tacker.api.v1 import resource_helper
 from tacker.common import exceptions
+from tacker import manager
 from tacker.plugins.common import constants
 from tacker.services import service_base
 
@@ -559,6 +561,138 @@ RESOURCE_ATTRIBUTE_MAP = {
             'allow_put': False,
             'is_visible': True,
         },
+    },
+
+    'vnfclusters': {
+        'id': {
+            'allow_post': False,
+            'allow_put': False,
+            'validate': {'type:uuid': None},
+            'is_visible': True,
+            'primary_key': True
+        },
+        'tenant_id': {
+            'allow_post': True,
+            'allow_put': False,
+            'validate': {'type:string': None},
+            'required_by_policy': True,
+            'is_visible': True
+        },
+        'vnf_id': {
+            'allow_post': True,
+            'allow_put': False,
+            'validate': {'type:uuid': None},
+            'is_visible': True,
+        },
+        'vnfd_id': {
+            'allow_post': False,
+            'allow_put': False,
+            'validate': {'type:uuid': None},
+            'is_visible': True,
+        },
+        'vnf_ids': {
+            'allow_post': False,
+            'allow_put': False,
+            'validate': {'type:service_type_list': None},
+            'is_visible': True,
+            'default': attr.ATTR_NOT_SPECIFIED,
+        },
+        'name': {
+            'allow_post': True,
+            'allow_put': False,
+            'validate': {'type:string': None},
+            'is_visible': True,
+        },
+        'active': {
+            'allow_post': True,
+            'allow_put': False,
+            'is_visible': True,
+            'default': 1,
+        },
+        'standby': {
+            'allow_post': True,
+            'allow_put': False,
+            'is_visible': True,
+            'default': 0,
+        },
+        'status': {
+            'allow_post': False,
+            'allow_put': False,
+            'is_visible': True,
+        },
+        'metadata': {
+            'allow_post': True,
+            'allow_put': True,
+            'convert_to': attr.convert_none_to_empty_dict,
+            'validate': {'type:dict_or_nodata': None},
+            'is_visible': True,
+            'default': None,
+        },
+        'created_at': {
+            'allow_post': False,
+            'allow_put': False,
+            'is_visible': True,
+        },
+        'updated_at': {
+            'allow_post': False,
+            'allow_put': False,
+            'is_visible': True,
+        },
+    },
+}
+SUB_RESOURCE_ATTRIBUTE_MAP = {
+    'members': {
+        'parent': {
+            'collection_name': 'vnfclusters',
+            'member_name': 'vnfcluster'
+        },
+        'members': {
+            'cluster_member': {
+                'parameters': {
+                    'id': {
+                        'allow_post': False,
+                        'allow_put': False,
+                        'validate': {'type:uuid': None},
+                        'is_visible': True,
+                        'primary_key': True
+                    },
+                    'cluster_id': {
+                        'allow_post': False,
+                        'allow_put': False,
+                        'validate': {'type:uuid': None},
+                        'is_visible': True,
+                    },
+                    'vnf_id': {
+                        'allow_post': False,
+                        'allow_put': False,
+                        'validate': {'type:uuid': None},
+                        'is_visible': True,
+                    },
+                    'name': {
+                        'allow_post': False,
+                        'allow_put': False,
+                        'validate': {'type:string': None},
+                        'is_visible': True,
+                    },
+                    'index': {
+                        'allow_post': False,
+                        'allow_put': False,
+                        'is_visible': True,
+                    },
+                    'role': {
+                        'allow_post': False,
+                        'allow_put': False,
+                        'validate': {'type:string': None},
+                        'is_visible': True,
+                    },
+                    'created_at': {
+                        'allow_post': False,
+                        'allow_put': False,
+                        'is_visible': True,
+                    },
+                }
+            }
+        }
     }
 }
 
@@ -590,9 +724,32 @@ class Nfvo(extensions.ExtensionDescriptor):
         plural_mappings = resource_helper.build_plural_mappings(
             special_mappings, RESOURCE_ATTRIBUTE_MAP)
         attr.PLURALS.update(plural_mappings)
-        return resource_helper.build_resource_info(
+
+        resources = resource_helper.build_resource_info(
             plural_mappings, RESOURCE_ATTRIBUTE_MAP, constants.NFVO,
             translate_name=True)
+        plugin = manager.TackerManager.get_service_plugins()[
+            constants.NFVO]
+        for collection_name in SUB_RESOURCE_ATTRIBUTE_MAP:
+            parent = SUB_RESOURCE_ATTRIBUTE_MAP[collection_name]['parent']
+
+            for resource_name in SUB_RESOURCE_ATTRIBUTE_MAP[
+                    collection_name]['members']:
+                params = SUB_RESOURCE_ATTRIBUTE_MAP[
+                    collection_name]['members'][resource_name]['parameters']
+
+                controller = base.create_resource(collection_name,
+                                                  resource_name,
+                                                  plugin, params,
+                                                  allow_bulk=True,
+                                                  parent=parent)
+
+            resource = extensions.ResourceExtension(
+                collection_name,
+                controller, parent,
+                attr_map=params)
+            resources.append(resource)
+        return resources
 
     @classmethod
     def get_plugin_interface(cls):

@@ -158,6 +158,8 @@ node_types:
     capabilities:
       nfv_compute:
         type: tosca.datatypes.compute_properties
+      nfv_ha_cluster:
+        type: tosca.datatypes.cluster_properties
     properties:
       name:
         type: string

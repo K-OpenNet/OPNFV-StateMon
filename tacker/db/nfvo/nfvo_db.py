@@ -33,6 +33,10 @@ from tacker.extensions import nfvo
 from tacker import manager
 from tacker.plugins.common import constants
 
+######MinSik
+from oslo_log import log as logging
+LOG = logging.getLogger(__name__)
+####
 
 VIM_ATTRIBUTES = ('id', 'type', 'tenant_id', 'name', 'description',
                   'placement_attr', 'shared', 'is_default',
@@ -64,6 +68,32 @@ class VimAuth(model_base.BASE, models_v1.HasId):
     auth_url = sa.Column(sa.String(255), nullable=False)
     vim_project = sa.Column(types.Json, nullable=False)
     auth_cred = sa.Column(types.Json, nullable=False)
+
+
+class VnfCluster(model_base.BASE, models_v1.HasTenant, models_v1.HasId,
+                 models_v1.Audit):
+    """VNF Cluster Data Model"""
+
+    name = sa.Column(sa.String(255), nullable=False)
+
+    # List of associated VNFs
+    vnfd_id = sa.Column(sa.String(255), nullable=False)
+    active_number = sa.Column(sa.Integer, nullable=False)
+    standby_number = sa.Column(sa.Integer, nullable=False)
+    cluster_members = orm.relationship("VnfClusterMember", backref="vnfcluster")
+
+    status = sa.Column(sa.String(255), nullable=False)
+
+
+class VnfClusterMember(model_base.BASE, models_v1.HasId, models_v1.Audit):
+    """VNF Cluster Member Data Model"""
+
+    cluster_id = sa.Column(types.Uuid, sa.ForeignKey('vnfclusters.id'))
+    member = orm.relationship('VnfCluster', backref='vnfclustermember')
+
+    name = sa.Column(sa.String(255), nullable=False)
+    index = sa.Column(sa.Integer, nullable=False)
+    role = sa.Column(sa.String(255), nullable=False)
 
 
 class NfvoPluginDb(nfvo.NFVOPluginBase, db_base.CommonDbMixin):
@@ -257,3 +287,20 @@ class NfvoPluginDb(nfvo.NFVOPluginBase, db_base.CommonDbMixin):
     def get_default_vim(self, context):
         vim_db = self._get_default_vim(context)
         return self._make_vim_dict(vim_db, mask_password=False)
+
+    def create_vnfcluster(self, context, vnfcluster):
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("nfvo_db create_vnfcluster : %s"), vnfcluster['vnfcluster']['name'])
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))

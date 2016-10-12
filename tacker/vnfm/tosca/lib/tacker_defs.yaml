@@ -72,6 +72,69 @@ data_types:
         type: map
         required: false
 
+  tosca.datatypes.loadblance.pool:
+    properties:
+      admin_state_up:
+        type: boolean
+        required: false
+      lb_method:
+        type: string
+        required: false
+        default: ROUND_ROBIN
+        constraints:
+          - valid_values: [ROUND_ROBIN, LEAST_CONNECTIONS, SOURCE_IP]
+      protocol:
+        type: string
+        required: false
+        default: HTTP
+        constraints:
+          - valid_values: [HTTP, HTTPS, TCP]
+      protocol_port:
+        type: integer
+        required: false
+        default: 80
+      subnet:
+        type: string
+        required: true
+
+  tosca.datatypes.loadblance.vip:
+    properties:
+      address:
+        type: string
+        required: false
+      admin_state_up:
+        type: boolean
+        required: false
+        default: true
+      connection_limit:
+        type: integer
+        required: false
+        default: -1
+      protocol:
+        type: string
+        required: false
+        default: HTTP
+        constraints:
+          - valid_values: [HTTP, HTTPS, TCP]
+      protocol_port:
+        type: integer
+        required: false
+        default: 80
+      subnet:
+        type: string
+        required: true
+
+  tosca.datatypes.cluster_properties:
+    properties:
+      active:
+        type: integer
+        required: true
+        default: 1
+      standby:
+        type: integer
+        required: true
+        default: 0
+
 policy_types:
   tosca.policies.tacker.Placement:
     derived_from: tosca.policies.Root
@@ -156,3 +219,18 @@ policy_types:
         required: false
         default: 120
         description: Wait time (in seconds) between consecutive scaling operations. During the cooldown period, scaling action will be ignored
+
+  tosca.policies.tacker.Loadbalance:
+    derived_from: tosca.policies.Root
+    properties:
+      pool:
+        type: tosca.datatypes.loadblance.pool
+        required: true
+      vip:
+        type: tosca.datatypes.loadblance.vip
+        required: true
+      targets:
+        type: list
+        entry_schema:
+          type: string
+        required: ture

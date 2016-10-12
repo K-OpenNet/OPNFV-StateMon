@@ -333,6 +333,64 @@ class NfvoPlugin(nfvo_db.NfvoPluginDb, vnffg_db.VnffgPluginDbMixin):
         super(NfvoPlugin, self)._delete_vnffg_post(context, vnffg_id, False)
         return vnffg_dict
 
+    def _make_vnf_create_dict(self, vnf, name):
+        vnf_dict = dict()
+        c = dict()
+        c['description'] = ''
+        c['tenant_id'] = vnf['tenant_id']
+        c['vim_id'] = vnf['vim_id']
+        c['name'] = name
+        c['placement_attr'] = vnf['placement_attr']
+        c['attributes'] = {}
+        c['vnfd_id'] = vnf['vnfd_id']
+        vnf_dict['vnf'] = c
+        LOG.debug(_("_make_policy_dict c : %s"), c)
+        return vnf_dict
+
+    @log.log
+    def create_vnfcluster(self, context, vnfcluster):
+        temp = vnfcluster['vnfcluster']
+        vnf_id = vnfcluster['vnfcluster']['vnf_id']
+        vnfm_plugin = manager.TackerManager.get_service_plugins()['VNFM']
+        vnf = vnfm_plugin.get_vnf(context, vnf_id)
+        vnf_dict = self._make_vnf_create_dict(vnf, temp['name'])
+        vnfm_plugin.create_vnf(context, vnf_dict)
+        region_name = vnf_dict.get('placement_attr', {}).get('region_name', None)
+        vim_obj = self._get_vim_from_vnf(context, vnf_id)
+        vim_auth = vim_obj['auth_cred']
+        vim_type = vim_obj['type']
+        vnfd_yaml = vnf['vnfd']['attributes']['vnfd']
+        vnfd_dict = yamlparser.simple_ordered_parse(vnfd_yaml)
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+
+        LOG.debug(_("create_vnfcluster vnfd_id : %s"), self._make_vnf_create_dict(vnf, temp['name']))
+        LOG.debug(_("create_vnfcluster vnfd_id : %s"), vnf['vnfd_id'])
+        LOG.debug(_("create_vnfcluster vnf : %s"), vnf)
+        LOG.debug(_("create_vnfcluster vnf_dict : %s"), vnf_dict)
+        LOG.debug(_("create_vnfcluster temp : %s"), temp)
+        LOG.debug(_("create_vnfcluster : %s"), super(NfvoPlugin, self).create_vnfcluster(context, vnfcluster))
+        LOG.debug(_("create_vnfcluster vnfd_dict: %s"), vnfd_dict)
+        LOG.debug(_("create_vnfcluster vim_auth: %s"), vim_auth)
+        LOG.debug(_("create_vnfcluster region_name: %s"), region_name)
+        LOG.debug(_("create_vnfcluster vim_type: %s"), vim_type)
+
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        ##self._vim_drivers.invoke(vim_obj['type'], 'create_lb',
+        ##                         vnf=vnf,
+        ##                         auth_attr=auth_attr)
+
     def _get_vim_from_vnf(self, context, vnf_id):
         """Figures out VIM based on a VNF
 
