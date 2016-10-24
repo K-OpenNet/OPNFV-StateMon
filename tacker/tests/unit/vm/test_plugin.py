@@ -16,23 +16,26 @@
 import uuid
 
 import mock
+from mock import patch
 import yaml
 
+from tacker.common import exceptions
 from tacker import context
 from tacker.db.common_services import common_services_db
 from tacker.db.nfvo import nfvo_db
-from tacker.db.vm import vm_db
+from tacker.db.vnfm import vnfm_db
 from tacker.extensions import vnfm
 from tacker.plugins.common import constants
 from tacker.tests.unit.db import base as db_base
 from tacker.tests.unit.db import utils
-from tacker.vm import plugin
+from tacker.vnfm import plugin
 
 
 class FakeDriverManager(mock.Mock):
     def invoke(self, *args, **kwargs):
         if 'create' in args:
             return str(uuid.uuid4())
+
         if 'get_resource_info' in args:
             return {'resources': {'name': 'dummy_vnf',
                                   'type': 'dummy',
@@ -60,6 +63,7 @@ class TestVNFMPlugin(db_base.SqlTestCase):
         self._stub_get_vim()
         self._mock_device_manager()
         self._mock_vnf_monitor()
+        self._mock_vnf_alarm_monitor()
         self._mock_green_pool()
         self._insert_dummy_vim()
         self.vnfm_plugin = plugin.VNFMPlugin()
@@ -106,9 +110,16 @@ class TestVNFMPlugin(db_base.SqlTestCase):
         self._mock(
             'tacker.vnfm.monitor.VNFMonitor', fake_vnf_monitor)
 
+    def _mock_vnf_alarm_monitor(self):
+        self._vnf_alarm_monitor = mock.Mock(wraps=FakeVNFMonitor())
+        fake_vnf_alarm_monitor = mock.Mock()
+        fake_vnf_alarm_monitor.return_value = self._vnf_alarm_monitor
+        self._mock(
+            'tacker.vnfm.monitor.VNFAlarmMonitor', fake_vnf_alarm_monitor)
+
     def _insert_dummy_device_template(self):
         session = self.context.session
-        device_template = vm_db.VNFD(
+        device_template = vnfm_db.VNFD(
             id='eb094833-995e-49f0-a047-dfb56aaf7c4e',
             tenant_id='ad7ebc56538745a08ef7c5e97f8bd437',
             name='fake_template',
@@ -119,10 +130,21 @@ class TestVNFMPlugin(db_base.SqlTestCase):
         session.flush()
         return device_template
 
+    def _insert_dummy_vnfd_attributes(self, template):
+        session = self.context.session
+        vnfd_attr = vnfm_db.VNFDAttribute(
+            id='eb094833-995e-49f0-a047-dfb56aaf7c4e',
+            vnfd_id='eb094833-995e-49f0-a047-dfb56aaf7c4e',
+            key='vnfd',
+            value=template)
+        session.add(vnfd_attr)
+        session.flush()
+        return vnfd_attr
+
     def _insert_dummy_device(self):
         session = self.context.session
-        device_db = vm_db.VNF(
-            id='6261579e-d6f3-49ad-8bc3-a9cb974778ff',
+        device_db = vnfm_db.VNF(
+            id='6261579e-d6f3-49ad-8bc3-a9cb974778fe',
             tenant_id='ad7ebc56538745a08ef7c5e97f8bd437',
             name='fake_device',
             description='fake_device_description',
@@ -134,6 +156,30 @@ class TestVNFMPlugin(db_base.SqlTestCase):
         session.add(device_db)
         session.flush()
         return device_db
+
+    def _insert_scaling_attributes_vnf(self):
+        session = self.context.session
+        vnf_attributes = vnfm_db.VNFAttribute(
+            id='7800cb81-7ed1-4cf6-8387-746468522651',
+            vnf_id='6261579e-d6f3-49ad-8bc3-a9cb974778fe',
+            key='scaling_group_names',
+            value='{"SP1": "G1"}'
+        )
+        session.add(vnf_attributes)
+        session.flush()
+        return vnf_attributes
+
+    def _insert_scaling_attributes_vnfd(self):
+        session = self.context.session
+        vnfd_attributes = vnfm_db.VNFDAttribute(
+            id='7800cb81-7ed1-4cf6-8387-746468522650',
+            vnfd_id='eb094833-995e-49f0-a047-dfb56aaf7c4e',
+            key='vnfd',
+            value=utils.vnfd_scale_tosca_template
+        )
+        session.add(vnfd_attributes)
+        session.flush()
+        return vnfd_attributes
 
     def _insert_dummy_vim(self):
         session = self.context.session
@@ -156,9 +202,9 @@ class TestVNFMPlugin(db_base.SqlTestCase):
         session.add(vim_auth_db)
         session.flush()
 
-    @mock.patch('tacker.vm.plugin.toscautils.updateimports')
-    @mock.patch('tacker.vm.plugin.ToscaTemplate')
-    @mock.patch('tacker.vm.plugin.toscautils.get_mgmt_driver')
+    @mock.patch('tacker.vnfm.plugin.toscautils.updateimports')
+    @mock.patch('tacker.vnfm.plugin.ToscaTemplate')
+    @mock.patch('tacker.vnfm.plugin.toscautils.get_mgmt_driver')
     def test_create_vnfd(self, mock_get_mgmt_driver, mock_tosca_template,
                         mock_update_imports):
         mock_get_mgmt_driver.return_value = 'dummy_mgmt_driver'
@@ -175,7 +221,7 @@ class TestVNFMPlugin(db_base.SqlTestCase):
         self.assertIn('attributes', result)
         self.assertIn('created_at', result)
         self.assertIn('updated_at', result)
-        yaml_dict = yaml.safe_load(utils.vnfd_openwrt)
+        yaml_dict = yaml.safe_load(utils.tosca_vnfd_openwrt)
         mock_tosca_template.assert_called_once_with(
             a_file=False, yaml_dict_tpl=yaml_dict)
         mock_get_mgmt_driver.assert_called_once_with(mock.ANY)
@@ -189,6 +235,14 @@ class TestVNFMPlugin(db_base.SqlTestCase):
         vnfd_obj = utils.get_dummy_vnfd_obj()
         vnfd_obj['vnfd'].pop('service_types')
         self.assertRaises(vnfm.ServiceTypesNotSpecified,
+                          self.vnfm_plugin.create_vnfd,
+                          self.context, vnfd_obj)
+
+    def test_create_vnfd_duplicate_name(self):
+        self._insert_dummy_device_template()
+        vnfd_obj = utils.get_dummy_vnfd_obj()
+        vnfd_obj['vnfd']['name'] = 'fake_template'
+        self.assertRaises(exceptions.DuplicateResourceName,
                           self.vnfm_plugin.create_vnfd,
                           self.context, vnfd_obj)
 
@@ -232,6 +286,15 @@ class TestVNFMPlugin(db_base.SqlTestCase):
         self.assertIn('type', resources)
         self.assertIn('id', resources)
 
+    def test_create_vnf_duplicate_name(self):
+        self._insert_dummy_device_template()
+        self._insert_dummy_device()
+        vnf_obj = utils.get_dummy_vnf_obj()
+        vnf_obj['vnf']['name'] = 'fake_device'
+        self.assertRaises(exceptions.DuplicateResourceName,
+                          self.vnfm_plugin.create_vnf,
+                          self.context, vnf_obj)
+
     def test_delete_vnf(self):
         self._insert_dummy_device_template()
         dummy_device_obj = self._insert_dummy_device()
@@ -272,3 +335,104 @@ class TestVNFMPlugin(db_base.SqlTestCase):
             self.context, evt_type=constants.RES_EVT_UPDATE, res_id=mock.ANY,
             res_state=mock.ANY, res_type=constants.RES_TYPE_VNF,
             tstamp=mock.ANY)
+
+    def _get_dummy_scaling_policy(self, type):
+        vnf_scale = {}
+        vnf_scale['scale'] = {}
+        vnf_scale['scale']['type'] = type
+        vnf_scale['scale']['policy'] = 'SP1'
+        return vnf_scale
+
+    def _test_scale_vnf(self, type, scale_state):
+        # create vnfd
+        self._insert_dummy_device_template()
+        self._insert_scaling_attributes_vnfd()
+
+        # create vnf
+        dummy_device_obj = self._insert_dummy_device()
+        self._insert_scaling_attributes_vnf()
+
+        # scale vnf
+        vnf_scale = self._get_dummy_scaling_policy(type)
+        self.vnfm_plugin.create_vnf_scale(
+            self.context,
+            dummy_device_obj['id'],
+            vnf_scale)
+
+        # validate
+        self._device_manager.invoke.assert_called_once_with(
+            mock.ANY,
+            'scale',
+            plugin=mock.ANY,
+            context=mock.ANY,
+            auth_attr=mock.ANY,
+            policy=mock.ANY,
+            region_name=mock.ANY
+        )
+
+        self._pool.spawn_n.assert_called_once_with(mock.ANY)
+
+        self._cos_db_plugin.create_event.assert_called_with(
+            self.context,
+            evt_type=constants.RES_EVT_SCALE,
+            res_id='6261579e-d6f3-49ad-8bc3-a9cb974778fe',
+            res_state=scale_state,
+            res_type=constants.RES_TYPE_VNF,
+            tstamp=mock.ANY)
+
+    def test_scale_vnf_out(self):
+        self._test_scale_vnf('out', constants.PENDING_SCALE_OUT)
+
+    def test_scale_vnf_in(self):
+        self._test_scale_vnf('in', constants.PENDING_SCALE_IN)
+
+    def _get_dummy_active_vnf(self, vnfd_template):
+        dummy_vnf = utils.get_dummy_device_obj()
+        dummy_vnf['vnfd']['attributes']['vnfd'] = vnfd_template
+        dummy_vnf['status'] = 'ACTIVE'
+        dummy_vnf['instance_id'] = '4c00108e-c69d-4624-842d-389c77311c1d'
+        dummy_vnf['vim_id'] = '437ac8ef-a8fb-4b6e-8d8a-a5e86a376e8b'
+        return dummy_vnf
+
+    def _test_create_vnf_trigger(self, action_value):
+        vnf_id = "6261579e-d6f3-49ad-8bc3-a9cb974778fe"
+        trigger_request = {"trigger": {"action_name": action_value, "params": {
+            "credential": "026kll6n", "data": {"current": "alarm",
+                                               'alarm_id':
+                                    "b7fa9ffd-0a4f-4165-954b-5a8d0672a35f"}},
+            "policy_name": "vdu1_cpu_usage_monitoring_policy"}}
+        expected_result = {"action_name": action_value, "params": {
+            "credential": "026kll6n", "data": {"current": "alarm",
+            "alarm_id": "b7fa9ffd-0a4f-4165-954b-5a8d0672a35f"}},
+            "policy_name": "vdu1_cpu_usage_monitoring_policy"}
+        self._vnf_alarm_monitor.process_alarm_for_vnf.return_value = True
+        trigger_result = self.vnfm_plugin.create_vnf_trigger(
+            self.context, vnf_id, trigger_request)
+        self.assertEqual(expected_result, trigger_result)
+
+    @patch('tacker.db.vnfm.vnfm_db.VNFMPluginDb.get_vnf')
+    @patch('tacker.vnfm.monitor.ActionPolicy.get_policy')
+    def test_create_vnf_trigger_respawn(self, mock_get_policy, mock_get_vnf):
+        dummy_vnf = self._get_dummy_active_vnf(
+            utils.vnfd_alarm_respawn_tosca_template)
+        mock_get_vnf.return_value = dummy_vnf
+        mock_action_class = mock.Mock()
+        mock_get_policy.return_value = mock_action_class
+        self._test_create_vnf_trigger(action_value="respawn")
+        mock_get_policy.assert_called_once_with('respawn', 'test_vim')
+        mock_action_class.execute_action.assert_called_once_with(
+            self.vnfm_plugin, dummy_vnf)
+
+    @patch('tacker.db.vnfm.vnfm_db.VNFMPluginDb.get_vnf')
+    @patch('tacker.vnfm.monitor.ActionPolicy.get_policy')
+    def test_create_vnf_trigger_scale(self, mock_get_policy, mock_get_vnf):
+        dummy_vnf = self._get_dummy_active_vnf(
+            utils.vnfd_alarm_scale_tosca_template)
+        mock_get_vnf.return_value = dummy_vnf
+        mock_action_class = mock.Mock()
+        mock_get_policy.return_value = mock_action_class
+        scale_body = {'scale': {'policy': 'SP1', 'type': 'out'}}
+        self._test_create_vnf_trigger(action_value="SP1")
+        mock_get_policy.assert_called_once_with('scaling', 'test_vim')
+        mock_action_class.execute_action.assert_called_once_with(
+            self.vnfm_plugin, dummy_vnf, scale_body)

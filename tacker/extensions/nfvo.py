@@ -47,11 +47,9 @@ class VimDefaultNameNotDefined(exceptions.TackerException):
                 " in tacker.conf")
 
 
-# Deprecated. Will be removed in Ocata release
-class VimDefaultIdException(exceptions.TackerException):
-    message = _("Default VIM name %(vim_name)s is invalid or there are "
-                "multiple VIM matches found. Please specify a valid default "
-                "VIM in tacker.conf")
+class VimDefaultNameNotFound(exceptions.TackerException):
+    message = _("Default VIM name %(vim_name)s is invalid. Please specify a "
+                "valid default VIM name in tacker.conf")
 
 
 class VimDefaultDuplicateException(exceptions.TackerException):
@@ -578,24 +576,11 @@ RESOURCE_ATTRIBUTE_MAP = {
             'required_by_policy': True,
             'is_visible': True
         },
-        'vnf_id': {
+        'vnfd_id': {
             'allow_post': True,
             'allow_put': False,
             'validate': {'type:uuid': None},
             'is_visible': True,
-        },
-        'vnfd_id': {
-            'allow_post': False,
-            'allow_put': False,
-            'validate': {'type:uuid': None},
-            'is_visible': True,
-        },
-        'vnf_ids': {
-            'allow_post': False,
-            'allow_put': False,
-            'validate': {'type:service_type_list': None},
-            'is_visible': True,
-            'default': attr.ATTR_NOT_SPECIFIED,
         },
         'name': {
             'allow_post': True,
@@ -616,24 +601,6 @@ RESOURCE_ATTRIBUTE_MAP = {
             'default': 0,
         },
         'status': {
-            'allow_post': False,
-            'allow_put': False,
-            'is_visible': True,
-        },
-        'metadata': {
-            'allow_post': True,
-            'allow_put': True,
-            'convert_to': attr.convert_none_to_empty_dict,
-            'validate': {'type:dict_or_nodata': None},
-            'is_visible': True,
-            'default': None,
-        },
-        'created_at': {
-            'allow_post': False,
-            'allow_put': False,
-            'is_visible': True,
-        },
-        'updated_at': {
             'allow_post': False,
             'allow_put': False,
             'is_visible': True,
@@ -683,11 +650,6 @@ SUB_RESOURCE_ATTRIBUTE_MAP = {
                         'allow_post': False,
                         'allow_put': False,
                         'validate': {'type:string': None},
-                        'is_visible': True,
-                    },
-                    'created_at': {
-                        'allow_post': False,
-                        'allow_put': False,
                         'is_visible': True,
                     },
                 }

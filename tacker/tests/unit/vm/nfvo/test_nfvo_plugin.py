@@ -18,6 +18,8 @@ import uuid
 
 
 from mock import patch
+
+from tacker.common import exceptions
 from tacker import context
 from tacker.db.common_services import common_services_db
 from tacker.db.nfvo import nfvo_db
@@ -33,9 +35,10 @@ SECRET_PASSWORD = '***'
 
 
 def dummy_get_vim(*args, **kwargs):
-    vim_auth = utils.get_vim_auth_obj()
-    vim_auth['type'] = 'openstack'
-    return vim_auth
+    vim_obj = dict()
+    vim_obj['auth_cred'] = utils.get_vim_auth_obj()
+    vim_obj['type'] = 'openstack'
+    return vim_obj
 
 
 class FakeDriverManager(mock.Mock):
@@ -173,17 +176,15 @@ class TestNfvoPlugin(db_base.SqlTestCase):
         session.flush()
 
     def test_create_vim(self):
-        vim_dict = {'vim': {'type': 'openstack', 'auth_url':
-                    'http://localhost:5000', 'vim_project': {'name':
-                    'test_project'}, 'auth_cred': {'username': 'test_user',
-                                                   'password':
-                                                       'test_password'},
-                            'name': 'VIM0',
-                    'tenant_id': 'test-project'}}
+        vim_dict = utils.get_vim_obj()
         vim_type = 'openstack'
         res = self.nfvo_plugin.create_vim(self.context, vim_dict)
         self._cos_db_plugin.create_event.assert_any_call(
             self.context, evt_type=constants.RES_EVT_CREATE, res_id=mock.ANY,
+            res_state=mock.ANY, res_type=constants.RES_TYPE_VIM,
+            tstamp=mock.ANY)
+        self._cos_db_plugin.create_event.assert_any_call(
+            mock.ANY, evt_type=constants.RES_EVT_MONITOR, res_id=mock.ANY,
             res_state=mock.ANY, res_type=constants.RES_TYPE_VIM,
             tstamp=mock.ANY)
         self._driver_manager.invoke.assert_any_call(vim_type,
@@ -196,6 +197,14 @@ class TestNfvoPlugin(db_base.SqlTestCase):
         self.assertIn('placement_attr', res)
         self.assertIn('created_at', res)
         self.assertIn('updated_at', res)
+
+    def test_create_vim_duplicate_name(self):
+        self._insert_dummy_vim()
+        vim_dict = utils.get_vim_obj()
+        vim_dict['vim']['name'] = 'fake_vim'
+        self.assertRaises(exceptions.DuplicateResourceName,
+                          self.nfvo_plugin.create_vim,
+                          self.context, vim_dict)
 
     def test_delete_vim(self):
         self._insert_dummy_vim()
@@ -347,6 +356,7 @@ class TestNfvoPlugin(db_base.SqlTestCase):
             self.assertIn('status', result)
             self.assertEqual('PENDING_CREATE', result['status'])
             self._driver_manager.invoke.assert_called_with(mock.ANY, mock.ANY,
+                                                           name=mock.ANY,
                                                            vnfs=mock.ANY,
                                                            fc_id=mock.ANY,
                                                            auth_attr=mock.ANY,
@@ -367,6 +377,7 @@ class TestNfvoPlugin(db_base.SqlTestCase):
             self.assertIn('status', result)
             self.assertEqual('PENDING_CREATE', result['status'])
             self._driver_manager.invoke.assert_called_with(mock.ANY, mock.ANY,
+                                                           name=mock.ANY,
                                                            vnfs=mock.ANY,
                                                            fc_id=mock.ANY,
                                                            auth_attr=mock.ANY,

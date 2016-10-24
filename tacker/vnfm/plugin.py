@@ -30,7 +30,7 @@ from tacker.api.v1 import attributes
 from tacker.common import driver_manager
 from tacker.common import exceptions
 from tacker.common import utils
-from tacker.db.vm import vm_db
+from tacker.db.vnfm import vnfm_db
 from tacker.extensions import vnfm
 from tacker.plugins.common import constants
 from tacker.vnfm.mgmt_drivers import constants as mgmt_constants
@@ -107,7 +107,7 @@ class VNFMMgmtMixin(object):
             kwargs=kwargs)
 
 
-class VNFMPlugin(vm_db.VNFMPluginDb, VNFMMgmtMixin):
+class VNFMPlugin(vnfm_db.VNFMPluginDb, VNFMMgmtMixin):
     """VNFMPlugin which supports VNFM framework.
 
     Plugin which supports Tacker framework
@@ -126,9 +126,10 @@ class VNFMPlugin(vm_db.VNFMPluginDb, VNFMMgmtMixin):
         self.boot_wait = cfg.CONF.tacker.boot_wait
         self.vim_client = vim_client.VimClient()
         self._vnf_manager = driver_manager.DriverManager(
-            'tacker.tacker.device.drivers',
+            'tacker.tacker.vnfm.drivers',
             cfg.CONF.tacker.infra_driver)
         self._vnf_monitor = monitor.VNFMonitor(self.boot_wait)
+        self._vnf_alarm_monitor = monitor.VNFAlarmMonitor()
 
     def spawn_n(self, function, *args, **kwargs):
         self._pool.spawn_n(function, *args, **kwargs)
@@ -164,6 +165,9 @@ class VNFMPlugin(vm_db.VNFMPluginDb, VNFMMgmtMixin):
                 " will be removed in Ocata. infra_driver will be automatically"
                 " derived from target vim type. mgmt_driver will be derived "
                 "from TOSCA template values.")
+        name = vnfd_data['name']
+        if self._get_by_name(context, vnfm_db.VNFD, name):
+            raise exceptions.DuplicateResourceName(resource='VNFD', name=name)
 
         service_types = vnfd_data.get('service_types')
         if not attributes.is_attr_set(service_types):
@@ -237,21 +241,33 @@ class VNFMPlugin(vm_db.VNFMPluginDb, VNFMMgmtMixin):
                     vnfd_dict['mgmt_driver'] = mgmt_driver
         LOG.debug(_('vnfd %s'), vnfd)
 
-    def add_vnf_to_monitor(self, vnf_dict, vim_auth):
+    def add_vnf_to_monitor(self, vnf_dict, infra_driver):
         dev_attrs = vnf_dict['attributes']
         mgmt_url = vnf_dict['mgmt_url']
         if 'monitoring_policy' in dev_attrs and mgmt_url:
-            def action_cb(hosting_vnf_, action):
+            def action_cb(action):
                 action_cls = monitor.ActionPolicy.get_policy(action,
-                                                             vnf_dict)
+                                                             infra_driver)
                 if action_cls:
-                    action_cls.execute_action(self, hosting_vnf['vnf'],
-                                              vim_auth)
+                    action_cls.execute_action(self, hosting_vnf['vnf'])
 
             hosting_vnf = self._vnf_monitor.to_hosting_vnf(
                 vnf_dict, action_cb)
             LOG.debug('hosting_vnf: %s', hosting_vnf)
             self._vnf_monitor.add_hosting_vnf(hosting_vnf)
+
+    def add_alarm_url_to_vnf(self, vnf_dict):
+        vnfd_yaml = vnf_dict['vnfd']['attributes'].get('vnfd', '')
+        vnfd_dict = yaml.load(vnfd_yaml)
+        if vnfd_dict and vnfd_dict.get('tosca_definitions_version'):
+            polices = vnfd_dict['topology_template'].get('policies', [])
+            for policy_dict in polices:
+                name, policy = policy_dict.items()[0]
+                if policy['type'] in constants.POLICY_ALARMING:
+                    alarm_url = self._vnf_alarm_monitor.update_vnf_with_alarm(
+                        vnf_dict, name, policy)
+                    vnf_dict['attributes']['alarm_url'] = alarm_url
+                    break
 
     def config_vnf(self, context, vnf_dict):
         config = vnf_dict['attributes'].get('config')
@@ -334,6 +350,7 @@ class VNFMPlugin(vm_db.VNFMPluginDb, VNFMMgmtMixin):
         vnf_id = vnf_dict['id']
         LOG.debug(_('vnf_dict %s'), vnf_dict)
         self.mgmt_create_pre(context, vnf_dict)
+        self.add_alarm_url_to_vnf(vnf_dict)
         try:
             instance_id = self._vnf_manager.invoke(
                 driver_name, 'create', plugin=self,
@@ -362,6 +379,9 @@ class VNFMPlugin(vm_db.VNFMPluginDb, VNFMMgmtMixin):
         LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
 
         vnf_info = vnf['vnf']
+        name = vnf_info['name']
+        if self._get_by_name(context, vnfm_db.VNF, name):
+            raise exceptions.DuplicateResourceName(resource='VNF', name=name)
         vnf_attributes = vnf_info['attributes']
         if vnf_attributes.get('param_values'):
             param = vnf_attributes['param_values']
@@ -394,7 +414,7 @@ class VNFMPlugin(vm_db.VNFMPluginDb, VNFMMgmtMixin):
         def create_vnf_wait():
             self._create_vnf_wait(context, vnf_dict, vim_auth, infra_driver)
             if vnf_dict['status'] is not constants.ERROR:
-                self.add_vnf_to_monitor(vnf_dict, vim_auth)
+                self.add_vnf_to_monitor(vnf_dict, infra_driver)
             self.config_vnf(context, vnf_dict)
         self.spawn_n(create_vnf_wait)
         return vnf_dict
@@ -675,8 +695,8 @@ class VNFMPlugin(vm_db.VNFMPluginDb, VNFMMgmtMixin):
 
     def _make_policy_dict(self, vnf, name, policy):
         p = {}
-        p['type'] = policy['type']
-        p['properties'] = policy['properties']
+        p['type'] = policy.get('type')
+        p['properties'] = policy.get('properties') or policy.get('triggers')
         p['vnf'] = vnf
         p['name'] = name
         p['id'] = p['name']
@@ -760,6 +780,83 @@ class VNFMPlugin(vm_db.VNFMPluginDb, VNFMMgmtMixin):
         self._handle_vnf_scaling(context, policy_)
 
         return scale['scale']
+
+    def _validate_alarming_policy(self, context, policy):
+        vnf_id = policy['vnf']['id']
+        # validate policy type
+        type = policy['type']
+        if type not in constants.POLICY_ALARMING:
+            raise exceptions.VnfPolicyTypeInvalid(
+                type=type,
+                valid_types=constants.POLICY_ALARMING,
+                policy=policy['id']
+            )
+        # validate alarm status
+        if not self._vnf_alarm_monitor.process_alarm_for_vnf(policy):
+            raise exceptions.AlarmUrlInvalid(vnf_id=vnf_id)
+
+        # validate policy action
+        action = policy['action_name']
+        policy_ = None
+        if action not in constants.DEFAULT_ALARM_ACTIONS:
+            policy_ = self.get_vnf_policy(context, action, vnf_id)
+            if not policy_:
+                raise exceptions.VnfPolicyNotFound(
+                    vnf_id=action,
+                    policy=policy['id']
+                )
+        LOG.debug(_("Policy %s is validated successfully") % policy)
+        return policy_
+        # validate url
+
+    def _handle_vnf_monitoring(self, context, policy):
+        vnf_dict = policy['vnf']
+        if policy['action_name'] in constants.DEFAULT_ALARM_ACTIONS:
+            action = policy['action_name']
+            LOG.debug(_('vnf for monitoring: %s'), vnf_dict)
+            infra_driver, vim_auth = self._get_infra_driver(context, vnf_dict)
+            action_cls = monitor.ActionPolicy.get_policy(action,
+                                                         infra_driver)
+            if action_cls:
+                action_cls.execute_action(self, vnf_dict)
+
+        if policy.get('bckend_policy'):
+            bckend_policy = policy['bckend_policy']
+            bckend_policy_type = bckend_policy['type']
+            cp = policy['properties']['resize_compute']['condition'].\
+                get('comparison_operator')
+            if bckend_policy_type == constants.POLICY_SCALING:
+                action = 'scaling'
+                scale = {}
+                scale.setdefault('scale', {})
+                scale['scale']['type'] = 'out' if cp == 'gt' else 'in'
+                scale['scale']['policy'] = bckend_policy['name']
+                infra_driver, vim_auth = self._get_infra_driver(context,
+                                                                vnf_dict)
+                action_cls = monitor.ActionPolicy.get_policy(action,
+                                                             infra_driver)
+                if action_cls:
+                    action_cls.execute_action(self, vnf_dict, scale)
+
+    def create_vnf_trigger(
+            self, context, vnf_id, trigger):
+        # Verified API: pending
+        # Need to use: _make_policy_dict, get_vnf_policies, get_vnf_policy
+        # action: scaling, refer to template to find specific scaling policy
+        # we can extend in future to support other policies
+        # Monitoring policy should be describe in heat_template_yaml.
+        # Create first
+        policy_ = self.get_vnf_policy(context,
+                                      trigger['trigger']['policy_name'],
+                                      vnf_id)
+        policy_.update({'action_name': trigger['trigger']['action_name']})
+        policy_.update({'params': trigger['trigger']['params']})
+        bk_policy = self._validate_alarming_policy(context, policy_)
+        if bk_policy:
+            policy_.update({'bckend_policy': bk_policy})
+        self._handle_vnf_monitoring(context, policy_)
+
+        return trigger['trigger']
 
     def get_vnf_resources(self, context, vnf_id, fields=None, filters=None):
         vnf_info = self.get_vnf(context, vnf_id)

@@ -14,10 +14,13 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import os
 import threading
 import time
 import uuid
+import yaml
 
+from cryptography import fernet
 from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_utils import excutils
@@ -25,6 +28,7 @@ from oslo_utils import strutils
 
 from tacker._i18n import _
 from tacker.common import driver_manager
+from tacker.common import exceptions
 from tacker.common import log
 from tacker.common import utils
 from tacker import context as t_context
@@ -36,7 +40,9 @@ from tacker.plugins.common import constants
 from tacker.vnfm.tosca import utils as toscautils
 from toscaparser import tosca_template
 
+
 LOG = logging.getLogger(__name__)
+CONF = cfg.CONF
 
 
 def config_opts():
@@ -88,6 +94,9 @@ class NfvoPlugin(nfvo_db.NfvoPluginDb, vnffg_db.VnffgPluginDbMixin):
         LOG.debug(_('Create vim called with parameters %s'),
              strutils.mask_password(vim))
         vim_obj = vim['vim']
+        name = vim_obj['name']
+        if self._get_by_name(context, nfvo_db.Vim, name):
+            raise exceptions.DuplicateResourceName(resource='VIM', name=name)
         vim_type = vim_obj['type']
         vim_obj['id'] = str(uuid.uuid4())
         vim_obj['status'] = 'PENDING'
@@ -141,10 +150,16 @@ class NfvoPlugin(nfvo_db.NfvoPluginDb, vnffg_db.VnffgPluginDbMixin):
         if current_status != vim_obj["status"]:
             status = current_status
             with self._lock:
-                super(NfvoPlugin, self).update_vim_status(
-                    t_context.get_admin_context(),
+                context = t_context.get_admin_context()
+                res = super(NfvoPlugin, self).update_vim_status(context,
                     vim_id, status)
                 self._created_vims[vim_id]["status"] = status
+                self._cos_db_plg.create_event(
+                    context, res_id=res['id'],
+                    res_type=constants.RES_TYPE_VIM,
+                    res_state=res['status'],
+                    evt_type=constants.RES_EVT_MONITOR,
+                    tstamp=res[constants.RES_EVT_UPDATED_FLD])
 
     @log.log
     def validate_tosca(self, template):
@@ -205,25 +220,28 @@ class NfvoPlugin(nfvo_db.NfvoPluginDb, vnffg_db.VnffgPluginDbMixin):
         sfc = super(NfvoPlugin, self).get_sfc(context, nfp['chain_id'])
         match = super(NfvoPlugin, self).get_classifier(context,
                                                        nfp['classifier_id'],
-                                                       fields='match')
+                                                       fields='match')['match']
         # grab the first VNF to check it's VIM type
         # we have already checked that all VNFs are in the same VIM
-        vim_auth = self._get_vim_from_vnf(context,
-                                          list(vnffg_dict[
-                                              'vnf_mapping'].values())[0]
-                                          )
+        vim_obj = self._get_vim_from_vnf(context,
+                                         list(vnffg_dict[
+                                              'vnf_mapping'].values())[0])
         # TODO(trozet): figure out what auth info we actually need to pass
         # to the driver.  Is it a session, or is full vim obj good enough?
-        driver_type = vim_auth['type']
+        driver_type = vim_obj['type']
         try:
             fc_id = self._vim_drivers.invoke(driver_type,
                                              'create_flow_classifier',
-                                             fc=match, auth_attr=vim_auth,
+                                             name=vnffg_dict['name'],
+                                             fc=match,
+                                             auth_attr=vim_obj['auth_cred'],
                                              symmetrical=sfc['symmetrical'])
-            sfc_id = self._vim_drivers.invoke(driver_type, 'create_chain',
+            sfc_id = self._vim_drivers.invoke(driver_type,
+                                              'create_chain',
+                                              name=vnffg_dict['name'],
                                               vnfs=sfc['chain'], fc_id=fc_id,
                                               symmetrical=sfc['symmetrical'],
-                                              auth_attr=vim_auth)
+                                              auth_attr=vim_obj['auth_cred'])
         except Exception:
             with excutils.save_and_reraise_exception():
                 self.delete_vnffg(context, vnffg_id=vnffg_dict['id'])
@@ -265,24 +283,23 @@ class NfvoPlugin(nfvo_db.NfvoPluginDb, vnffg_db.VnffgPluginDbMixin):
         LOG.debug(_('chain update: %s'), chain)
         sfc['chain'] = chain
         sfc['symmetrical'] = new_vnffg['symmetrical']
-        vim_auth = self._get_vim_from_vnf(context,
-                                          list(vnffg_dict[
-                                              'vnf_mapping'].values())[0]
-                                          )
-        driver_type = vim_auth['type']
+        vim_obj = self._get_vim_from_vnf(context,
+                                         list(vnffg_dict[
+                                              'vnf_mapping'].values())[0])
+        driver_type = vim_obj['type']
         try:
             # we don't support updating the match criteria in first iteration
             # so this is essentially a noop.  Good to keep for future use
             # though.
             self._vim_drivers.invoke(driver_type, 'update_flow_classifier',
                                      fc_id=fc['instance_id'], fc=fc['match'],
-                                     auth_attr=vim_auth,
+                                     auth_attr=vim_obj['auth_cred'],
                                      symmetrical=new_vnffg['symmetrical'])
             self._vim_drivers.invoke(driver_type, 'update_chain',
                                      vnfs=sfc['chain'],
                                      fc_ids=[fc['instance_id']],
                                      chain_id=sfc['instance_id'],
-                                     auth_attr=vim_auth,
+                                     auth_attr=vim_obj['auth_cred'],
                                      symmetrical=new_vnffg['symmetrical'])
         except Exception:
             with excutils.save_and_reraise_exception():
@@ -310,21 +327,20 @@ class NfvoPlugin(nfvo_db.NfvoPluginDb, vnffg_db.VnffgPluginDbMixin):
 
         fc = super(NfvoPlugin, self).get_classifier(context,
                                                     nfp['classifier_id'])
-        vim_auth = self._get_vim_from_vnf(context,
-                                          list(vnffg_dict[
-                                              'vnf_mapping'].values())[0]
-                                          )
-        driver_type = vim_auth['type']
+        vim_obj = self._get_vim_from_vnf(context,
+                                         list(vnffg_dict[
+                                              'vnf_mapping'].values())[0])
+        driver_type = vim_obj['type']
         try:
             if sfc['instance_id'] is not None:
                 self._vim_drivers.invoke(driver_type, 'delete_chain',
                                          chain_id=sfc['instance_id'],
-                                         auth_attr=vim_auth)
+                                         auth_attr=vim_obj['auth_cred'])
             if fc['instance_id'] is not None:
                 self._vim_drivers.invoke(driver_type,
                                          'delete_flow_classifier',
                                          fc_id=fc['instance_id'],
-                                         auth_attr=vim_auth)
+                                         auth_attr=vim_obj['auth_cred'])
         except Exception:
             with excutils.save_and_reraise_exception():
                 vnffg_dict['status'] = constants.ERROR
@@ -333,34 +349,130 @@ class NfvoPlugin(nfvo_db.NfvoPluginDb, vnffg_db.VnffgPluginDbMixin):
         super(NfvoPlugin, self)._delete_vnffg_post(context, vnffg_id, False)
         return vnffg_dict
 
-    def _make_vnf_create_dict(self, vnf, name):
-        vnf_dict = dict()
-        c = dict()
+    def _make_vnf_create_dict(self, cluster, name):
+        vnf_dict = {}
+        c = {}
         c['description'] = ''
-        c['tenant_id'] = vnf['tenant_id']
-        c['vim_id'] = vnf['vim_id']
+        c['tenant_id'] = cluster['tenant_id']
+        c['vim_id'] = ''
         c['name'] = name
-        c['placement_attr'] = vnf['placement_attr']
+        c['placement_attr'] = {}
         c['attributes'] = {}
-        c['vnfd_id'] = vnf['vnfd_id']
+        c['vnfd_id'] = cluster['vnfd_id']
         vnf_dict['vnf'] = c
         LOG.debug(_("_make_policy_dict c : %s"), c)
         return vnf_dict
 
+    def _create_cluster(self, context, cluster):
+        cluster_dict = self._create_cluster_pre(context, cluster)
+        cluster_id = cluster_dict['id']
+        LOG.debug(_('vnf_dict %s'), cluster_dict)
+
+        return cluster_dict
+
+        # vnf_dict = self._create_vnf_pre(
+        #     context, vnf) if not vnf.get('id') else vnf
+        # vnf_id = vnf_dict['id']
+        # LOG.debug(_('vnf_dict %s'), vnf_dict)
+        # self.mgmt_create_pre(context, vnf_dict)
+        # self.add_alarm_url_to_vnf(vnf_dict)
+        # try:
+        #     instance_id = self._vnf_manager.invoke(
+        #         driver_name, 'create', plugin=self,
+        #         context=context, vnf=vnf_dict, auth_attr=vim_auth)
+        # except Exception:
+        #     with excutils.save_and_reraise_exception():
+        #         self.delete_vnf(context, vnf_id)
+#
+        # if instance_id is None:
+        #     self._create_vnf_post(context, vnf_id, None, None,
+        #                           vnf_dict)
+        #     return
+        # vnf_dict['instance_id'] = instance_id
+        # return vnf_dict
+
     @log.log
     def create_vnfcluster(self, context, vnfcluster):
-        temp = vnfcluster['vnfcluster']
-        vnf_id = vnfcluster['vnfcluster']['vnf_id']
+        # Variable : port-id list from lb-policy target
+
+        # Create Cluster with VNF-id from command
+        # 1. Create DB(Cluster)
+        # 2. Add cluster member with VNF-id
+
+
+        # end
+
+        # Add new VNF in Cluster
+        # 1. Create VNF with ACTIVE and STANBY number
+        # 2. Create DB(Cluster Member)
+
+
+        # end
+
+        # Create Load-balancer for cluster
+
+
+        # end
+
+        #vnf name for test
+        vnf_name = 'cluster-vnf1'
+        cluster_info = vnfcluster['vnfcluster']
+        pre_vnf_dict = self._make_vnf_create_dict(cluster_info, vnf_name)
         vnfm_plugin = manager.TackerManager.get_service_plugins()['VNFM']
-        vnf = vnfm_plugin.get_vnf(context, vnf_id)
-        vnf_dict = self._make_vnf_create_dict(vnf, temp['name'])
-        vnfm_plugin.create_vnf(context, vnf_dict)
-        region_name = vnf_dict.get('placement_attr', {}).get('region_name', None)
-        vim_obj = self._get_vim_from_vnf(context, vnf_id)
-        vim_auth = vim_obj['auth_cred']
-        vim_type = vim_obj['type']
-        vnfd_yaml = vnf['vnfd']['attributes']['vnfd']
-        vnfd_dict = yamlparser.simple_ordered_parse(vnfd_yaml)
+        vnf_dict = vnfm_plugin.create_vnf(context, pre_vnf_dict)
+
+        #cluster_dict = self._create_cluster(context, cluster_info)
+
+        # _create_vnf_wait
+        #new_status = constants.ACTIVE
+        #cluster_dict['status'] = new_status
+        #cluster_id = cluster_dict['id']
+        #self._create_cluster_status(context, cluster_id, new_status)
+
+
+        ## vnf = vnfm_plugin.get_vnf(context, vnf_id)
+        ## vnfd_dict = yaml.load(vnf['vnfd']['attributes']['vnfd'])
+        ## vnf_dict = self._make_vnf_create_dict(vnf, temp['name'])
+        ## new_vnf_dict = vnfm_plugin.create_vnf(context, vnf_dict)
+        ## region_name = vnf_dict.get('placement_attr', {}).get('region_name', None)
+        ## vim_obj = self._get_vim_from_vnf(context, vnf_id)
+        ## vim_auth = vim_obj['auth_cred']
+        ## vim_type = vim_obj['type']
+
+        ## vnf_resource = vnfm_plugin.get_vnf_resources(context, vnf_id)
+        ## polices = vnfd_dict['topology_template'].get('policies', [])
+        ## target_list = None
+        ## for policy_dict in polices:
+        ##     for name, policy in policy_dict.items():
+        ##         def _add(policy):
+        ##             p = self._make_policy_dict(vnf, name, policy)
+        ##             p['name'] = name
+        ##             policy_list.append(p)
+        ##         #_add(policy)
+        ##         target_list = policy.get('properties')['targets']
+        ##         LOG.debug(_("create_vnfcluster target_list: %s"), target_list)
+
+        ## vnf_cp = list()
+        ## for resource in vnf_resource:
+        ##     if resource['name'] in target_list:
+        ##         LOG.debug(_("create_vnfcluster resource['name']: %s"), resource['name'])
+        ##         vnf_cp.append(resource['id'])
+        ##         break
+        ##
+        ## while(1):
+        ##     LOG.debug(_("create_vnfcluster new_vnf_dict.get('status'): %s"), new_vnf_dict.get('status'))
+        ##     if new_vnf_dict.get('status') == 'ACTIVE':
+        ##         break
+        ##     time.sleep(1)
+
+        ## vnf_resource2 = vnfm_plugin.get_vnf_resources(context, new_vnf_dict.get('id'))
+        ## for resource2 in vnf_resource2:
+        ##     if resource2['name'] in target_list:
+        ##         LOG.debug(_("create_vnfcluster resource['name']: %s"), resource2['name'])
+        ##         vnf_cp.append(resource2['id'])
+        ##         break
+
+
         LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
         LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
         LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
@@ -369,27 +481,38 @@ class NfvoPlugin(nfvo_db.NfvoPluginDb, vnffg_db.VnffgPluginDbMixin):
         LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
         LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
 
-        LOG.debug(_("create_vnfcluster vnfd_id : %s"), self._make_vnf_create_dict(vnf, temp['name']))
-        LOG.debug(_("create_vnfcluster vnfd_id : %s"), vnf['vnfd_id'])
-        LOG.debug(_("create_vnfcluster vnf : %s"), vnf)
+        LOG.debug(_("create_vnfcluster pre_vnf_dict : %s"), pre_vnf_dict)
         LOG.debug(_("create_vnfcluster vnf_dict : %s"), vnf_dict)
-        LOG.debug(_("create_vnfcluster temp : %s"), temp)
-        LOG.debug(_("create_vnfcluster : %s"), super(NfvoPlugin, self).create_vnfcluster(context, vnfcluster))
-        LOG.debug(_("create_vnfcluster vnfd_dict: %s"), vnfd_dict)
-        LOG.debug(_("create_vnfcluster vim_auth: %s"), vim_auth)
-        LOG.debug(_("create_vnfcluster region_name: %s"), region_name)
-        LOG.debug(_("create_vnfcluster vim_type: %s"), vim_type)
-
-        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
-        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
-        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
-        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
-        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
-        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
-        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        #LOG.debug(_("create_vnfcluster cluster_dict : %s"), cluster_dict)
+        #LOG.debug(_("create_vnfcluster cluster_id : %s"), cluster_id)
+        ## LOG.debug(_("create_vnfcluster temp : %s"), temp)
+        ## LOG.debug(_("create_vnfcluster vnfd_id : %s"), self._make_vnf_create_dict(vnf, temp['name']))
+        ## LOG.debug(_("create_vnfcluster vnfd_id : %s"), vnf['vnfd_id'])
+        ## LOG.debug(_("create_vnfcluster vnf : %s"), vnf)
+        ## LOG.debug(_("create_vnfcluster vnf_dict : %s"), vnf_dict)
+        ## LOG.debug(_("create_vnfcluster temp : %s"), temp)
+        ## LOG.debug(_("create_vnfcluster : %s"), super(NfvoPlugin, self).create_vnfcluster(context, vnfcluster))
+        ## LOG.debug(_("create_vnfcluster vnfd_dict: %s"), vnfd_dict)
+        ## LOG.debug(_("create_vnfcluster vim_auth: %s"), vim_auth)
+        ## LOG.debug(_("create_vnfcluster region_name: %s"), region_name)
+##
+        ## LOG.debug(_("create_vnfcluster target_list: %s"), target_list)
+        ## LOG.debug(_("create_vnfcluster vnf_cp: %s"), vnf_cp)
+        ## LOG.debug(_("create_vnfcluster new_vnf_dict : %s"), new_vnf_dict)
+        ## LOG.debug(_("create_vnfcluster new_vnf_dict id : %s"), new_vnf_dict.get('id'))
+        ## LOG.debug(_("create_vnfcluster polices : %s"), polices)
+##
+        ## LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        ## LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        ## LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        ## LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        ## LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        ## LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        ## LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
         ##self._vim_drivers.invoke(vim_obj['type'], 'create_lb',
         ##                         vnf=vnf,
         ##                         auth_attr=auth_attr)
+        #return cluster_dict
 
     def _get_vim_from_vnf(self, context, vnf_id):
         """Figures out VIM based on a VNF
@@ -400,10 +523,36 @@ class NfvoPlugin(nfvo_db.NfvoPluginDb, vnffg_db.VnffgPluginDbMixin):
         """
         vnfm_plugin = manager.TackerManager.get_service_plugins()['VNFM']
         vim_id = vnfm_plugin.get_vnf(context, vnf_id, fields=['vim_id'])
-        vim_obj = self.get_vim(context, vim_id['vim_id'])
+        vim_obj = self.get_vim(context, vim_id['vim_id'], mask_password=False)
+        vim_auth = vim_obj['auth_cred']
+        vim_auth['password'] = self._decode_vim_auth(vim_obj['id'],
+                                                     vim_auth['password'].
+                                                     encode('utf-8'))
+        vim_auth['auth_url'] = vim_obj['auth_url']
         if vim_obj is None:
             raise nfvo.VimFromVnfNotFoundException(vnf_id=vnf_id)
+
         return vim_obj
+
+    def _decode_vim_auth(self, vim_id, cred):
+        """Decode Vim credentials
+
+        Decrypt VIM cred. using Fernet Key
+        """
+        vim_key = self._find_vim_key(vim_id)
+        f = fernet.Fernet(vim_key)
+        if not f:
+            LOG.warning(_('Unable to decode VIM auth'))
+            raise nfvo.VimNotFoundException('Unable to decode VIM auth key')
+        return f.decrypt(cred)
+
+    @staticmethod
+    def _find_vim_key(vim_id):
+        key_file = os.path.join(CONF.vim_keys.openstack, vim_id)
+        LOG.debug(_('Attempting to open key file for vim id %s'), vim_id)
+        with open(key_file, 'r') as f:
+                return f.read()
+        LOG.warning(_('VIM id invalid or key not found for  %s'), vim_id)
 
     def _vim_resource_name_to_id(self, context, resource, name, vnf_id):
         """Converts a VIM resource name to its ID
@@ -414,10 +563,10 @@ class NfvoPlugin(nfvo_db.NfvoPluginDb, vnffg_db.VnffgPluginDbMixin):
                the classifier will apply to
         :return: ID of the resource name
         """
-        vim_auth = self._get_vim_from_vnf(context, vnf_id)
-        driver_type = vim_auth['type']
+        vim_obj = self._get_vim_from_vnf(context, vnf_id)
+        driver_type = vim_obj['type']
         return self._vim_drivers.invoke(driver_type,
                                         'get_vim_resource_id',
-                                        vim_auth=vim_auth,
+                                        vim_auth=vim_obj['auth_cred'],
                                         resource_type=resource,
                                         resource_name=name)

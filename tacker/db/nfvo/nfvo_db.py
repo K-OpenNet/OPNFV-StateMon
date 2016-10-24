@@ -28,7 +28,7 @@ from tacker.db import db_base
 from tacker.db import model_base
 from tacker.db import models_v1
 from tacker.db import types
-from tacker.db.vm import vm_db
+from tacker.db.vnfm import vnfm_db
 from tacker.extensions import nfvo
 from tacker import manager
 from tacker.plugins.common import constants
@@ -70,22 +70,20 @@ class VimAuth(model_base.BASE, models_v1.HasId):
     auth_cred = sa.Column(types.Json, nullable=False)
 
 
-class VnfCluster(model_base.BASE, models_v1.HasTenant, models_v1.HasId,
-                 models_v1.Audit):
+class VnfCluster(model_base.BASE, models_v1.HasTenant, models_v1.HasId):
     """VNF Cluster Data Model"""
-
     name = sa.Column(sa.String(255), nullable=False)
 
     # List of associated VNFs
     vnfd_id = sa.Column(sa.String(255), nullable=False)
-    active_number = sa.Column(sa.Integer, nullable=False)
-    standby_number = sa.Column(sa.Integer, nullable=False)
+    active = sa.Column(sa.Integer, nullable=False)
+    standby = sa.Column(sa.Integer, nullable=False)
     cluster_members = orm.relationship("VnfClusterMember", backref="vnfcluster")
 
     status = sa.Column(sa.String(255), nullable=False)
 
 
-class VnfClusterMember(model_base.BASE, models_v1.HasId, models_v1.Audit):
+class VnfClusterMember(model_base.BASE, models_v1.HasId):
     """VNF Cluster Member Data Model"""
 
     cluster_id = sa.Column(types.Uuid, sa.ForeignKey('vnfclusters.id'))
@@ -197,7 +195,7 @@ class NfvoPluginDb(nfvo.NFVOPluginBase, db_base.CommonDbMixin):
 
     def is_vim_still_in_use(self, context, vim_id):
         with context.session.begin(subtransactions=True):
-            vnfs_db = self._model_query(context, vm_db.VNF).filter_by(
+            vnfs_db = self._model_query(context, vnfm_db.VNF).filter_by(
                 vim_id=vim_id).first()
             if vnfs_db is not None:
                 raise nfvo.VimInUseException(vim_id=vim_id)
@@ -245,29 +243,16 @@ class NfvoPluginDb(nfvo.NFVOPluginBase, db_base.CommonDbMixin):
                     Vim.id == vim_id).with_lockmode('update').one())
             except orm_exc.NoResultFound:
                     raise nfvo.VimNotFoundException(vim_id=vim_id)
-            vim_db.update({'status': status})
-            self._cos_db_plg.create_event(
-                context, res_id=vim_db['id'],
-                res_type=constants.RES_TYPE_VIM,
-                res_state=vim_db['status'],
-                evt_type=constants.RES_EVT_UPDATE,
-                tstamp=timeutils.utcnow())
+            vim_db.update({'status': status,
+                           'updated_at': timeutils.utcnow()})
         return self._make_vim_dict(vim_db)
 
     # Deprecated. Will be removed in Ocata release
     def get_vim_by_name(self, context, vim_name, fields=None,
                         mask_password=True):
         vim_db = self._get_by_name(context, Vim, vim_name)
-        return self._make_vim_dict(vim_db, mask_password=mask_password)
-
-    # Deprecated. Will be removed in Ocata release
-    def _get_by_name(self, context, model, name):
-        try:
-            query = self._model_query(context, model)
-            return query.filter(model.name == name).one()
-        except orm_exc.NoResultFound:
-            if issubclass(model, Vim):
-                raise
+        return self._make_vim_dict(vim_db, mask_password=mask_password
+                                   )if vim_db else None
 
     def _validate_default_vim(self, context, vim, vim_id=None):
         if not vim.get('is_default'):
@@ -288,19 +273,79 @@ class NfvoPluginDb(nfvo.NFVOPluginBase, db_base.CommonDbMixin):
         vim_db = self._get_default_vim(context)
         return self._make_vim_dict(vim_db, mask_password=False)
 
+
+
+    def _make_cluster_dict(self, cluster_db, fields=None):
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_('cluster_db %s'), cluster_db)
+        res = {}
+        key_list = ('id', 'tenant_id', 'name', 'vnfd_id', 'active',
+                    'standby', 'status', 'created_at', 'updated_at')
+        res.update((key, vnf_db[key]) for key in key_list)
+        return self._fields(res, fields)
+
+    def _create_cluster_status(self, context, cluster_id, new_status):
+        with context.session.begin(subtransactions=True):
+            query = (self._model_query(context, VnfCluster).
+                     filter(VnfCluster.id == cluster_id))
+            query.update({'status': new_status})
+
+    def _create_cluster_pre(self, context, cluster):
+        LOG.debug(_('cluster %s'), cluster)
+        tenant_id = self._get_tenant_id_for_create(context, cluster)
+        vnfcluster_id = str(uuid.uuid4())
+        vnfd_id = cluster['vnfd_id']
+        name = cluster.get('name')
+        cluster_id = str(uuid.uuid4())
+        active = cluster.get('active', 1)
+        standby = cluster.get('standby', 0)
+        with context.session.begin(subtransactions=True):
+            cluster_db = VnfCluster(id=vnfcluster_id,
+                                    tenant_id=tenant_id,
+                                    name=name,
+                                    vnfd_id=vnfd_id,
+                                    active=active,
+                                    standby=standby,
+                                    status=constants.PENDING_CREATE)
+            context.session.add(cluster_db)
+
+        return self._make_cluster_dict(cluster_db)
+
     def create_vnfcluster(self, context, vnfcluster):
         LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        #template = vnffgd['vnffgd']
+        #LOG.debug(_('template %s'), template)
+        #tenant_id = self._get_tenant_id_for_create(context, template)
+
+        #with context.session.begin(subtransactions=True):
+        #    template_id = str(uuid.uuid4())
+        #    template_db = VnffgTemplate(
+        #        id=template_id,
+        #        tenant_id=tenant_id,
+        #        name=template.get('name'),
+        #        description=template.get('description'),
+        #        template=template.get('template'))
+        #    context.session.add(template_db)
+
+        #LOG.debug(_('template_db %(template_db)s'),
+        #          {'template_db': template_db})
+        #return self._make_template_dict(template_db)
+
+
+    def get_vnfcluster(self, context, cluster_id, fields=None):
+        vnf_db = self._get_resource(context, VnfCluster, cluster_id)
+        return self._make_cluster_dict(vnf_db, fields)
+
+    def get_vnfclusters(self, context, filters=None, fields=None):
         LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
         LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        LOG.debug(_('get_vnfclusters context : %s'), context)
+        LOG.debug(_('get_vnfclusters filters : %s'), filters)
+        LOG.debug(_('get_vnfclusters fields : %s'), fields)
         LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
         LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
-        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
-        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
-        LOG.debug(_("nfvo_db create_vnfcluster : %s"), vnfcluster['vnfcluster']['name'])
-        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
-        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
-        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
-        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
-        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
-        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
-        LOG.debug(_("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"))
+        return self._get_collection(context, VnfCluster, self._make_cluster_dict,
+                                    filters=filters, fields=fields)
