@@ -18,6 +18,7 @@ Work items:
 
 Support Senlin auto-scaling policy in heat-translator:
 https://review.openstack.org/#/c/365224/
+
 Integrate Senlin resource to Tacker for VDU management Blueprint:
 https://review.openstack.org/#/c/352943/
 
@@ -27,5 +28,6 @@ External Resources:
 
 Tacker Wiki:
 https://wiki.openstack.org/wiki/Tacker
+
 For help on usage and hacking of Tacker, please send mail to
 <mailto:openstack-dev@lists.openstack.org> with [Tacker] tag.
